@@ -112,4 +112,86 @@ int  pthread_cancel(pthread_tthread);
 ## 1.2 程序设计框图
 ![未命名文件](https://user-images.githubusercontent.com/114986300/195299847-f0101a87-c367-48c6-b8a9-bf7118be41cf.png)
 
-在主控制线程中
+在主控制线程中创建了三个请求线程，三个计算线程。使用了两个队列，一个存放计算请求，另一个存放计算结果。请求线程对请求队列进行写入，因此这里引入一把队列互斥锁实现对请求队列的保护。计算线程从请求队列中读取计算请求，并且放入每个线程各自的请求队列，然后对其进行计算后放入计算结果队列中，这里引入第二把锁来对计算结果队列进行保护。
+这里要特别说明线程之间共享着文件表项及文件描述符，又因为read操作是原子操作，从而在多线程读文件时不会出现不正常读取现象。但是需要注意的是在各个请求放入总请求队列时会发生竞争导致错乱，在这里需要加入请求队列互斥量来避免多线程竞争。M个计算线程需要考虑当总请求队列中有任务时要去读取请求，将它们放入自己的队列中，注意如果没有任务时，这些线程也会不断的去尝试读取队列。
+## 1.3 核心数据结构
+### 1.3.1 互斥锁以及信号量
+```
+pthread_mutex_t lock =PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t lock2 =PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t ready =PTHREAD_COND_INITIALIZER;
+
+```
+为了防止由于各个线程之间产生竞争关系必须适当加上一些锁。在程序设计架构里可以看到，多线程会对总的请求队列和总的结构队列产生竞争操作，所以我们需要定义两个互斥量，分别为lock与lock2,这两个互斥量分别对于请求队列的锁与结构队列的锁。程序运行过程中，每个线程会不断地去争夺请求队列锁，从而需要判断队列是否为空。在请求队列为空的情况下，如果每个线程仍然去不断地争夺互斥量这必将导致程序效果低下，同时产生很多不必要的阻塞。因此定义一个条件变量ready，当线程得知当前请求队列为空时就进入睡眠状态，等待请求队列不为空的条件变量去激活，这样就能有效的避免大量的线程阻塞。
+### 1.3.2 队列结构
+```
+typedef struct Object object;
+typedef struct Queue queue;
+
+struct Object{
+	int a; 
+	int b;                  //Operands
+	char ope[MaxChar];	//operater
+	double res;		//result
+ object* next;
+};
+
+struct Queue{
+	object* head;
+	object* tail;
+};
+```
+定义了队列结构如上，使用了链表式队列，队列里有object类型的头尾指针，object里有计算请求的相关信息：元素的值，运算符，运算结果和下一个object的地址。object结构既能表示每个任务请求，又能表示每个计算结果。 
+
+## 1.4 异常情况设计
+### 1.4.1 产生多个请求队列出错
+产生多个请求队列出错时，退出线程,并输出提示信息，部分代码如下。
+```
+for (int i = 1; i <= 3; i++){						//crerate three requie thread
+	if (pthread_create(&tid, NULL, pthr_req, &i) != 0){
+		printf("create the %dth require thread error\n", i);
+		exit(0);
+	}
+ ```
+### 1.4.2 产生多个计算队列出错
+产生多个计算队列出错时，退出线程,并输出提示信息，部分代码如下。
+```
+	for (int i = 1; i <= 3; i++){						//cerate three calculate thread
+	if (pthread_create(&tid, NULL, pthr_cal, &i) != 0){
+		printf("create the %dth calculate thread error\n", i);
+		exit(0);
+	}
+ ````
+### 1.4.3 输入的参数有误
+当输入信息有误，即输入的参数中没有指定计算文件时，退出线程,并输出提示信息，部分代码如下。
+```
+	if (argc != 2){
+        	printf("input error\n");
+        	exit(0);
+        }
+```
+### 1.4.4 打不开指定的计算文件
+当打不开指定的计算文件时，退出线程，并输出提示信息，部分代码如下。
+```
+if ((fd = open(argv[1], O_RDONLY)) < 0){
+        	printf("open file error\n");
+      	  	exit(0);
+        }
+```
+### 1.4.5 堆中申请结构体不成功
+当在堆中申请定义结构体的空间不成功时，退出线程，并输出提示信息，部分代码如下。
+```
+ if ((jp = (object *)malloc(sizeof(object))) == NULL){
+				printf("thread malloc error\n");
+        			exit(0);
+```
+### 1.4.6  请求错误
+
+当程序在运行的过程中，如果请求中有错误请求时则会产生错误报告，不退出继续执行下一个计算：如输入 4 / 0时，因为除数不能为0，所以会产生"4 / 0, b cannot be zero"的报告。并输出提示信息，部分代码如下。
+
+```
+if (jp->b == 0){
+			printf("%d / %d, b cannotbe zero\n", jp->a, jp->b);
+	       		jp->res = -1;
+```
+
